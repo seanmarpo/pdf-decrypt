@@ -29,17 +29,17 @@ export function concat(...arrays) {
 // ========== SHA Hash Functions (Web Crypto) ==========
 
 export async function sha256(data) {
-  const hash = await crypto.subtle.digest('SHA-256', data);
+  const hash = await crypto.subtle.digest("SHA-256", data);
   return new Uint8Array(hash);
 }
 
 export async function sha384(data) {
-  const hash = await crypto.subtle.digest('SHA-384', data);
+  const hash = await crypto.subtle.digest("SHA-384", data);
   return new Uint8Array(hash);
 }
 
 export async function sha512(data) {
-  const hash = await crypto.subtle.digest('SHA-512', data);
+  const hash = await crypto.subtle.digest("SHA-512", data);
   return new Uint8Array(hash);
 }
 
@@ -52,8 +52,18 @@ export async function sha512(data) {
  * Strips PKCS#7 padding since input is always block-aligned
  */
 export async function aes128CbcEncrypt(data, key, iv) {
-  const cryptoKey = await crypto.subtle.importKey('raw', key, 'AES-CBC', false, ['encrypt']);
-  const encrypted = await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, cryptoKey, data);
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    key,
+    "AES-CBC",
+    false,
+    ["encrypt"],
+  );
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-CBC", iv },
+    cryptoKey,
+    data,
+  );
   // Strip PKCS#7 padding block (data is always block-aligned in Algorithm 2.B)
   return new Uint8Array(encrypted).slice(0, data.byteLength);
 }
@@ -70,8 +80,18 @@ export async function aes128CbcEncrypt(data, key, iv) {
  * @returns {Promise<Uint8Array>} - Decrypted plaintext
  */
 export async function aes256CbcDecrypt(data, key, iv) {
-  const cryptoKey = await crypto.subtle.importKey('raw', key, 'AES-CBC', false, ['decrypt']);
-  const decrypted = await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, cryptoKey, data);
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    key,
+    "AES-CBC",
+    false,
+    ["decrypt"],
+  );
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-CBC", iv },
+    cryptoKey,
+    data,
+  );
   return new Uint8Array(decrypted);
 }
 
@@ -100,7 +120,13 @@ export async function aes256CbcDecrypt(data, key, iv) {
  * @returns {Promise<Uint8Array>} - Decrypted plaintext (same length as ciphertext)
  */
 export async function aes256CbcDecryptNoPad(ciphertext, key, iv) {
-  const cryptoKey = await crypto.subtle.importKey('raw', key, 'AES-CBC', false, ['encrypt', 'decrypt']);
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    key,
+    "AES-CBC",
+    false,
+    ["encrypt", "decrypt"],
+  );
 
   // Get the last ciphertext block
   const lastBlock = ciphertext.slice(ciphertext.length - 16);
@@ -113,14 +139,22 @@ export async function aes256CbcDecryptNoPad(ciphertext, key, iv) {
 
   // AES-ECB encrypt the XORed block (CBC with zero IV = ECB for single block)
   const zeroIV = new Uint8Array(16);
-  const encResult = await crypto.subtle.encrypt({ name: 'AES-CBC', iv: zeroIV }, cryptoKey, xored);
+  const encResult = await crypto.subtle.encrypt(
+    { name: "AES-CBC", iv: zeroIV },
+    cryptoKey,
+    xored,
+  );
   const cFake = new Uint8Array(encResult).slice(0, 16);
 
   // Append forged block to ciphertext
   const extended = concat(ciphertext, cFake);
 
   // Decrypt — Web Crypto will find valid PKCS#7 padding and strip it
-  const decrypted = await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, cryptoKey, extended);
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-CBC", iv },
+    cryptoKey,
+    extended,
+  );
   return new Uint8Array(decrypted).slice(0, ciphertext.length);
 }
 
@@ -144,7 +178,10 @@ export async function aes256EcbDecryptBlock(block, key) {
  * @returns {Promise<CryptoKey>} - Imported CryptoKey for decryption
  */
 export async function importAES256DecryptKey(key) {
-  return await crypto.subtle.importKey('raw', key, 'AES-CBC', false, ['encrypt', 'decrypt']);
+  return await crypto.subtle.importKey("raw", key, "AES-CBC", false, [
+    "encrypt",
+    "decrypt",
+  ]);
 }
 
 /**
@@ -157,7 +194,67 @@ export async function importAES256DecryptKey(key) {
  * @returns {Promise<Uint8Array>} - Decrypted plaintext
  */
 export async function aes256CbcDecryptWithKey(data, cryptoKey, iv) {
-  const decrypted = await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, cryptoKey, data);
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-CBC", iv },
+    cryptoKey,
+    data,
+  );
+  return new Uint8Array(decrypted);
+}
+
+/**
+ * AES-128-CBC decrypt with PKCS#7 padding removal (for per-object decryption)
+ * Standard Web Crypto decrypt — handles padding automatically.
+ *
+ * @param {Uint8Array} data - Ciphertext (must be multiple of 16 bytes)
+ * @param {Uint8Array} key - 16-byte AES-128 key
+ * @param {Uint8Array} iv - 16-byte initialization vector
+ * @returns {Promise<Uint8Array>} - Decrypted plaintext
+ */
+export async function aes128CbcDecrypt(data, key, iv) {
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    key,
+    "AES-CBC",
+    false,
+    ["decrypt"],
+  );
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-CBC", iv },
+    cryptoKey,
+    data,
+  );
+  return new Uint8Array(decrypted);
+}
+
+/**
+ * Import an AES-128 key for reuse across multiple decrypt operations
+ *
+ * @param {Uint8Array} key - 16-byte AES-128 key
+ * @returns {Promise<CryptoKey>} - Imported CryptoKey for decryption
+ */
+export async function importAES128DecryptKey(key) {
+  return await crypto.subtle.importKey("raw", key, "AES-CBC", false, [
+    "encrypt",
+    "decrypt",
+  ]);
+}
+
+/**
+ * AES-128-CBC decrypt using a pre-imported CryptoKey (for per-object bulk decryption)
+ * Handles PKCS#7 padding removal automatically.
+ *
+ * @param {Uint8Array} data - Ciphertext (must be multiple of 16 bytes)
+ * @param {CryptoKey} cryptoKey - Pre-imported AES-128 CryptoKey
+ * @param {Uint8Array} iv - 16-byte initialization vector
+ * @returns {Promise<Uint8Array>} - Decrypted plaintext
+ */
+export async function aes128CbcDecryptWithKey(data, cryptoKey, iv) {
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-CBC", iv },
+    cryptoKey,
+    data,
+  );
   return new Uint8Array(decrypted);
 }
 

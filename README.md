@@ -1,12 +1,15 @@
-# @pdfsmaller/pdf-decrypt
+# @localonlytools/pdf-decrypt
 
-Full-featured PDF decryption with **AES-256** and **RC4** support. Built for browsers, Node.js 18+, Cloudflare Workers, and Deno.
+> **Fork notice:** This is a fork of [`@pdfsmaller/pdf-decrypt`](https://github.com/smither777/pdf-decrypt) by [PDFSmaller.com](https://pdfsmaller.com). All credit for the original work goes to the original author.
 
-Companion to [@pdfsmaller/pdf-encrypt](https://www.npmjs.com/package/@pdfsmaller/pdf-encrypt). Powers [PDFSmaller.com](https://pdfsmaller.com)'s [Unlock PDF](https://pdfsmaller.com/unlock-pdf) tool.
+Full-featured PDF decryption with **AES-256**, **AES-128**, and **RC4** support. Built for browsers, Node.js 18+, Cloudflare Workers, and Deno.
+
+This package powers the PDF tools on [Local Only Tools](https://localonly.tools) — a privacy-focused collection of browser-based utilities where all processing happens entirely on your device. No data is ever transmitted to a server. Check out the full suite of tools at [localonly.tools](https://localonly.tools), including [PDF Merge](https://localonly.tools/tools/pdf-merge/), [PDF Split](https://localonly.tools/tools/pdf-split/), [PDF Compress](https://localonly.tools/tools/pdf-compress/), and [PDF Redact](https://localonly.tools/tools/pdf-redact/).
 
 ## Features
 
 - **AES-256 decryption** (V=5, R=6) — PDF 2.0 standard
+- **AES-128 decryption** (V=4, R=4) — PDF 1.6+ standard
 - **RC4 40/128-bit decryption** (V=1-2, R=2-3) — legacy support
 - **User + Owner passwords** — accepts either password to decrypt
 - **Batched async decryption** — processes thousands of objects without browser freeze
@@ -18,13 +21,13 @@ Companion to [@pdfsmaller/pdf-encrypt](https://www.npmjs.com/package/@pdfsmaller
 ## Installation
 
 ```bash
-npm install @pdfsmaller/pdf-decrypt pdf-lib
+npm install @localonlytools/pdf-decrypt pdf-lib
 ```
 
 ## Quick Start
 
 ```javascript
-import { decryptPDF } from '@pdfsmaller/pdf-decrypt';
+import { decryptPDF } from '@localonlytools/pdf-decrypt';
 import fs from 'fs';
 
 const pdfBytes = fs.readFileSync('encrypted.pdf');
@@ -36,7 +39,7 @@ fs.writeFileSync('decrypted.pdf', decrypted);
 
 ### `decryptPDF(pdfBytes, password)`
 
-Decrypt a password-protected PDF. Supports both AES-256 and RC4 encryption — the algorithm is detected automatically.
+Decrypt a password-protected PDF. Supports AES-256, AES-128, and RC4 encryption — the algorithm is detected automatically.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -58,14 +61,14 @@ Check if a PDF is encrypted without attempting to decrypt it.
 |-----------|------|-------------|
 | `pdfBytes` | `Uint8Array` | The PDF file as bytes |
 
-**Returns:** `Promise<{ encrypted: boolean, algorithm?: 'AES-256' | 'RC4', version?: number, revision?: number, keyLength?: number }>`
+**Returns:** `Promise<{ encrypted: boolean, algorithm?: 'AES-256' | 'AES-128' | 'RC4', version?: number, revision?: number, keyLength?: number }>`
 
 ## Examples
 
 ### Decrypt with Auto-Detection
 
 ```javascript
-import { decryptPDF, isEncrypted } from '@pdfsmaller/pdf-decrypt';
+import { decryptPDF, isEncrypted } from '@localonlytools/pdf-decrypt';
 
 // Check encryption type first
 const info = await isEncrypted(pdfBytes);
@@ -79,7 +82,7 @@ if (info.encrypted) {
 
 ```javascript
 import { encryptPDF } from '@pdfsmaller/pdf-encrypt';
-import { decryptPDF } from '@pdfsmaller/pdf-decrypt';
+import { decryptPDF } from '@localonlytools/pdf-decrypt';
 
 // Encrypt
 const encrypted = await encryptPDF(pdfBytes, 'secret');
@@ -96,7 +99,7 @@ const decrypted = await decryptPDF(encrypted, 'secret');
 <button id="decrypt-btn">Decrypt</button>
 
 <script type="module">
-  import { decryptPDF } from '@pdfsmaller/pdf-decrypt';
+  import { decryptPDF } from '@localonlytools/pdf-decrypt';
 
   document.getElementById('decrypt-btn').addEventListener('click', async () => {
     const file = document.getElementById('pdf-input').files[0];
@@ -125,22 +128,23 @@ const decrypted = await decryptPDF(encrypted, 'secret');
 | Algorithm | PDF Version | Key Length | Status |
 |-----------|-------------|-----------|--------|
 | AES-256 (V=5, R=6) | 2.0 (ISO 32000-2) | 256-bit | Supported |
+| AES-128 (V=4, R=4) | 1.6+ (ISO 32000-1) | 128-bit | Supported |
 | RC4 (V=2, R=3) | 1.4+ (ISO 32000-1) | 128-bit | Supported |
 | RC4 (V=1, R=2) | 1.1+ | 40-bit | Supported |
-| AES-128 (V=4, R=4) | 1.6+ | 128-bit | Not yet supported |
 
 ## Comparison with pdf-decrypt-lite
 
 | Feature | pdf-decrypt | pdf-decrypt-lite |
 |---------|-------------|-----------------|
 | AES-256 | Yes | No |
+| AES-128 | Yes | No |
 | RC4 128-bit | Yes | Yes |
 | RC4 40-bit | Yes | Yes |
 | Batched async | Yes | No (sync only) |
 | Size | ~18KB | ~8KB |
 | Use case | Full decryption | RC4-only, minimal |
 
-Choose `pdf-decrypt-lite` if you only need RC4 and want the smallest possible bundle. Choose `pdf-decrypt` for full AES-256 + RC4 support.
+Choose `pdf-decrypt-lite` if you only need RC4 and want the smallest possible bundle. Choose `pdf-decrypt` for full AES-256 + AES-128 + RC4 support.
 
 ## Related Packages
 
@@ -152,4 +156,4 @@ Choose `pdf-decrypt-lite` if you only need RC4 and want the smallest possible bu
 
 ## License
 
-MIT — [PDFSmaller.com](https://pdfsmaller.com)
+MIT — Originally by [PDFSmaller.com](https://pdfsmaller.com). See the [original repository](https://github.com/smither777/pdf-decrypt) for more details. Maintained by [Local Only Tools](https://localonly.tools).

@@ -8,6 +8,7 @@
  *
  * Implements:
  *   - AES-256 (V=5, R=6) per ISO 32000-2:2020 — Algorithms 2.A, 2.B, 11, 12, 13
+ *   - AES-128 (V=4, R=4) per ISO 32000-1:2008 — Algorithms 1, 2, 5, 7 with crypt filters
  *   - RC4 128-bit (V=2, R=3) per ISO 32000-1:2008 — Algorithms 2, 4, 5, 7
  *   - RC4 40-bit (V=1, R=2) per ISO 32000-1:2008
  *
@@ -15,23 +16,37 @@
  * Verified against mozilla/pdf.js and Adobe Acrobat
  */
 
-import { PDFDocument, PDFName, PDFHexString, PDFString, PDFDict, PDFArray, PDFRawStream, PDFNumber, PDFRef } from 'pdf-lib';
-import { md5, RC4, hexToBytes, bytesToHex } from './crypto-rc4.js';
+import {
+  PDFDocument,
+  PDFName,
+  PDFHexString,
+  PDFString,
+  PDFDict,
+  PDFArray,
+  PDFRawStream,
+  PDFNumber,
+  PDFRef,
+} from "pdf-lib";
+import { md5, RC4, hexToBytes, bytesToHex } from "./crypto-rc4.js";
 import {
   sha256,
-  aes256CbcDecrypt, aes256CbcDecryptNoPad, aes256EcbDecryptBlock,
-  importAES256DecryptKey, aes256CbcDecryptWithKey,
-  computeHash2B, concat
-} from './crypto-aes.js';
+  aes256CbcDecrypt,
+  aes256CbcDecryptNoPad,
+  aes256EcbDecryptBlock,
+  importAES256DecryptKey,
+  aes256CbcDecryptWithKey,
+  aes128CbcDecrypt,
+  computeHash2B,
+  concat,
+} from "./crypto-aes.js";
 
 // ========== Constants ==========
 
 // Standard PDF padding string (from PDF specification)
 const PADDING = new Uint8Array([
-  0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41,
-  0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08,
-  0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80,
-  0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A
+  0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56, 0xff,
+  0xfa, 0x01, 0x08, 0x2e, 0x2e, 0x00, 0xb6, 0xd0, 0x68, 0x3e, 0x80, 0x2f, 0x0c,
+  0xa9, 0xfe, 0x64, 0x53, 0x69, 0x7a,
 ]);
 
 // Batch size for parallel AES-256 decryption
@@ -66,7 +81,7 @@ function extractBytes(pdfObj) {
 
   // Handle raw string representation (fallback)
   const str = pdfObj.toString();
-  if (str.startsWith('<') && str.endsWith('>')) {
+  if (str.startsWith("<") && str.endsWith(">")) {
     return hexToBytes(str.slice(1, -1));
   }
 
@@ -85,7 +100,7 @@ function saslPrepPassword(password) {
 
 /**
  * Read the encryption parameters from a PDF's trailer
- * Supports V=1-2 (RC4) and V=5 (AES-256)
+ * Supports V=1-2 (RC4), V=4 (AES-128/RC4 crypt filters), and V=5 (AES-256)
  */
 function readEncryptParams(context) {
   const trailer = context.trailerInfo;
@@ -111,25 +126,39 @@ function readEncryptParams(context) {
   }
 
   // Read basic encryption parameters
-  const V = encryptDict.get(PDFName.of('V'));
-  const R = encryptDict.get(PDFName.of('R'));
-  const Length = encryptDict.get(PDFName.of('Length'));
-  const P = encryptDict.get(PDFName.of('P'));
-  const O = encryptDict.get(PDFName.of('O'));
-  const U = encryptDict.get(PDFName.of('U'));
+  const V = encryptDict.get(PDFName.of("V"));
+  const R = encryptDict.get(PDFName.of("R"));
+  const Length = encryptDict.get(PDFName.of("Length"));
+  const P = encryptDict.get(PDFName.of("P"));
+  const O = encryptDict.get(PDFName.of("O"));
+  const U = encryptDict.get(PDFName.of("U"));
 
-  const version = V ? (typeof V.asNumber === 'function' ? V.asNumber() : Number(V.toString())) : 0;
-  const revision = R ? (typeof R.asNumber === 'function' ? R.asNumber() : Number(R.toString())) : 0;
+  const version = V
+    ? typeof V.asNumber === "function"
+      ? V.asNumber()
+      : Number(V.toString())
+    : 0;
+  const revision = R
+    ? typeof R.asNumber === "function"
+      ? R.asNumber()
+      : Number(R.toString())
+    : 0;
 
   // Extract permissions (signed 32-bit integer)
-  const permissions = P ? (typeof P.asNumber === 'function' ? P.asNumber() : Number(P.toString())) : 0;
+  const permissions = P
+    ? typeof P.asNumber === "function"
+      ? P.asNumber()
+      : Number(P.toString())
+    : 0;
 
   // Extract O and U values
   const ownerKey = extractBytes(O);
   const userKey = extractBytes(U);
 
   if (!ownerKey || !userKey) {
-    throw new Error('Could not read /O or /U values from encryption dictionary');
+    throw new Error(
+      "Could not read /O or /U values from encryption dictionary",
+    );
   }
 
   // Extract file ID
@@ -154,44 +183,94 @@ function readEncryptParams(context) {
     permissions,
     fileId,
     encryptRef,
-    encryptDict
+    encryptDict,
   };
 
   // V=5, R=6: AES-256 specific fields
   if (version === 5 && revision === 6) {
-    const OE = encryptDict.get(PDFName.of('OE'));
-    const UE = encryptDict.get(PDFName.of('UE'));
-    const Perms = encryptDict.get(PDFName.of('Perms'));
-    const EncryptMetadata = encryptDict.get(PDFName.of('EncryptMetadata'));
+    const OE = encryptDict.get(PDFName.of("OE"));
+    const UE = encryptDict.get(PDFName.of("UE"));
+    const Perms = encryptDict.get(PDFName.of("Perms"));
+    const EncryptMetadata = encryptDict.get(PDFName.of("EncryptMetadata"));
 
     params.ownerEncryptKey = extractBytes(OE);
     params.userEncryptKey = extractBytes(UE);
     params.perms = extractBytes(Perms);
 
     if (!params.ownerEncryptKey || !params.userEncryptKey || !params.perms) {
-      throw new Error('Missing /OE, /UE, or /Perms in AES-256 encryption dictionary');
+      throw new Error(
+        "Missing /OE, /UE, or /Perms in AES-256 encryption dictionary",
+      );
     }
 
     // EncryptMetadata defaults to true per spec
     if (EncryptMetadata) {
       const emStr = EncryptMetadata.toString();
-      params.encryptMetadata = emStr !== 'false';
+      params.encryptMetadata = emStr !== "false";
     } else {
       params.encryptMetadata = true;
     }
 
-    params.algorithm = 'AES-256';
+    params.algorithm = "AES-256";
     params.keyLength = 32;
   } else if (version <= 3 && revision <= 4) {
     // RC4 (V=1-2, R=2-3)
-    let keyLengthBits = Length ? (typeof Length.asNumber === 'function' ? Length.asNumber() : Number(Length.toString())) : 40;
+    let keyLengthBits = Length
+      ? typeof Length.asNumber === "function"
+        ? Length.asNumber()
+        : Number(Length.toString())
+      : 40;
     if (revision >= 3 && !Length) keyLengthBits = 128;
     params.keyLength = keyLengthBits / 8;
-    params.algorithm = 'RC4';
+    params.algorithm = "RC4";
+  } else if (version === 4) {
+    // V=4: Crypt filter-based encryption (AES-128 or RC4)
+    // Determine stream and string crypt filter methods from /CF, /StmF, /StrF
+    let stmFilter = "V2"; // default to RC4
+    let strFilter = "V2";
+
+    const CF = encryptDict.get(PDFName.of("CF"));
+    const StmF = encryptDict.get(PDFName.of("StmF"));
+    const StrF = encryptDict.get(PDFName.of("StrF"));
+
+    function resolveCFM(filterName) {
+      if (!filterName || filterName.toString() === "/Identity") return "None";
+      if (CF && CF instanceof PDFDict) {
+        const name = filterName.toString().replace("/", "");
+        const filterDict = CF.get(PDFName.of(name));
+        if (filterDict && filterDict instanceof PDFDict) {
+          const cfm = filterDict.get(PDFName.of("CFM"));
+          if (cfm) return cfm.toString().replace("/", "");
+        }
+      }
+      return "V2";
+    }
+
+    stmFilter = resolveCFM(StmF);
+    strFilter = resolveCFM(StrF);
+
+    // Handle EncryptMetadata (defaults to true per spec)
+    const EncryptMetadata = encryptDict.get(PDFName.of("EncryptMetadata"));
+    if (EncryptMetadata) {
+      const emStr = EncryptMetadata.toString();
+      params.encryptMetadata = emStr !== "false";
+    } else {
+      params.encryptMetadata = true;
+    }
+
+    params.keyLength = 16; // always 128-bit for V=4
+    params.stmFilter = stmFilter;
+    params.strFilter = strFilter;
+
+    if (stmFilter === "AESV2" || strFilter === "AESV2") {
+      params.algorithm = "AES-128";
+    } else {
+      params.algorithm = "RC4";
+    }
   } else {
     throw new Error(
       `Unsupported encryption: V=${version}, R=${revision}. ` +
-      `pdf-decrypt supports RC4 (V=1-2, R=2-3) and AES-256 (V=5, R=6).`
+        `pdf-decrypt supports RC4 (V=1-2, R=2-3), AES-128 (V=4, R=4), and AES-256 (V=5, R=6).`,
     );
   }
 
@@ -204,7 +283,10 @@ function readEncryptParams(context) {
  * Pad or truncate password according to PDF spec (RC4)
  */
 function padPassword(password) {
-  const pwdBytes = typeof password === 'string' ? new TextEncoder().encode(password) : password;
+  const pwdBytes =
+    typeof password === "string"
+      ? new TextEncoder().encode(password)
+      : password;
   const padded = new Uint8Array(32);
 
   if (pwdBytes.length >= 32) {
@@ -219,16 +301,30 @@ function padPassword(password) {
 
 /**
  * Compute encryption key (Algorithm 2 from PDF spec)
- * Works for both Rev 2 (RC4-40) and Rev 3 (RC4-128)
+ * Works for Rev 2 (RC4-40), Rev 3 (RC4-128), and Rev 4 (AES-128/RC4-128)
+ *
+ * For R >= 4 with EncryptMetadata = false, appends 0xFFFFFFFF per spec.
  */
-function computeEncryptionKey(password, ownerKey, permissions, fileId, revision, keyLength) {
+function computeEncryptionKey(
+  password,
+  ownerKey,
+  permissions,
+  fileId,
+  revision,
+  keyLength,
+  encryptMetadata = true,
+) {
   const paddedPwd = padPassword(password);
+
+  // For R >= 4 with EncryptMetadata false, append 4 bytes of 0xFF
+  const extraLen = revision >= 4 && !encryptMetadata ? 4 : 0;
 
   const hashInput = new Uint8Array(
     paddedPwd.length +
-    ownerKey.length +
-    4 + // permissions
-    fileId.length
+      ownerKey.length +
+      4 + // permissions
+      fileId.length +
+      extraLen,
   );
 
   let offset = 0;
@@ -239,12 +335,21 @@ function computeEncryptionKey(password, ownerKey, permissions, fileId, revision,
   offset += ownerKey.length;
 
   // Add permissions (low-order byte first)
-  hashInput[offset++] = permissions & 0xFF;
-  hashInput[offset++] = (permissions >> 8) & 0xFF;
-  hashInput[offset++] = (permissions >> 16) & 0xFF;
-  hashInput[offset++] = (permissions >> 24) & 0xFF;
+  hashInput[offset++] = permissions & 0xff;
+  hashInput[offset++] = (permissions >> 8) & 0xff;
+  hashInput[offset++] = (permissions >> 16) & 0xff;
+  hashInput[offset++] = (permissions >> 24) & 0xff;
 
   hashInput.set(fileId, offset);
+  offset += fileId.length;
+
+  // Append 0xFFFFFFFF when EncryptMetadata is false (R >= 4)
+  if (revision >= 4 && !encryptMetadata) {
+    hashInput[offset++] = 0xff;
+    hashInput[offset++] = 0xff;
+    hashInput[offset++] = 0xff;
+    hashInput[offset++] = 0xff;
+  }
 
   let hash = md5(hashInput);
 
@@ -264,9 +369,25 @@ function computeEncryptionKey(password, ownerKey, permissions, fileId, revision,
  * Returns the encryption key if valid, null if invalid
  */
 function validateUserPasswordRC4(password, encryptParams) {
-  const { ownerKey, userKey, permissions, fileId, revision, keyLength } = encryptParams;
+  const {
+    ownerKey,
+    userKey,
+    permissions,
+    fileId,
+    revision,
+    keyLength,
+    encryptMetadata,
+  } = encryptParams;
 
-  const encryptionKey = computeEncryptionKey(password, ownerKey, permissions, fileId, revision, keyLength);
+  const encryptionKey = computeEncryptionKey(
+    password,
+    ownerKey,
+    permissions,
+    fileId,
+    revision,
+    keyLength,
+    encryptMetadata,
+  );
 
   if (revision === 2) {
     // Algorithm 4: RC4 encrypt the padding with the key, compare to /U
@@ -359,19 +480,21 @@ function decryptObjectRC4(data, objectNum, generationNum, encryptionKey) {
   keyInput.set(encryptionKey);
 
   // Add object number (low byte first)
-  keyInput[encryptionKey.length] = objectNum & 0xFF;
-  keyInput[encryptionKey.length + 1] = (objectNum >> 8) & 0xFF;
-  keyInput[encryptionKey.length + 2] = (objectNum >> 16) & 0xFF;
+  keyInput[encryptionKey.length] = objectNum & 0xff;
+  keyInput[encryptionKey.length + 1] = (objectNum >> 8) & 0xff;
+  keyInput[encryptionKey.length + 2] = (objectNum >> 16) & 0xff;
 
   // Add generation number (low byte first)
-  keyInput[encryptionKey.length + 3] = generationNum & 0xFF;
-  keyInput[encryptionKey.length + 4] = (generationNum >> 8) & 0xFF;
+  keyInput[encryptionKey.length + 3] = generationNum & 0xff;
+  keyInput[encryptionKey.length + 4] = (generationNum >> 8) & 0xff;
 
   // Hash to get object key
   const objectKey = md5(keyInput);
 
   // Use up to 16 bytes of the hash as the key
-  const rc4 = new RC4(objectKey.slice(0, Math.min(encryptionKey.length + 5, 16)));
+  const rc4 = new RC4(
+    objectKey.slice(0, Math.min(encryptionKey.length + 5, 16)),
+  );
 
   return rc4.process(data);
 }
@@ -384,19 +507,35 @@ function decryptStringsRC4(obj, objectNum, generationNum, encryptionKey) {
 
   if (obj instanceof PDFString) {
     const originalBytes = obj.asBytes();
-    const decrypted = decryptObjectRC4(originalBytes, objectNum, generationNum, encryptionKey);
+    const decrypted = decryptObjectRC4(
+      originalBytes,
+      objectNum,
+      generationNum,
+      encryptionKey,
+    );
     // Convert bytes back to string via charCode (NOT bytesToHex)
-    obj.value = Array.from(decrypted).map(b => String.fromCharCode(b)).join('');
+    obj.value = Array.from(decrypted)
+      .map((b) => String.fromCharCode(b))
+      .join("");
   } else if (obj instanceof PDFHexString) {
     const originalBytes = obj.asBytes();
-    const decrypted = decryptObjectRC4(originalBytes, objectNum, generationNum, encryptionKey);
+    const decrypted = decryptObjectRC4(
+      originalBytes,
+      objectNum,
+      generationNum,
+      encryptionKey,
+    );
     obj.value = bytesToHex(decrypted);
   } else if (obj instanceof PDFDict) {
     const entries = obj.entries();
     for (const [key, value] of entries) {
       const keyName = key.asString();
       // Skip encryption-related entries
-      if (keyName !== '/Length' && keyName !== '/Filter' && keyName !== '/DecodeParms') {
+      if (
+        keyName !== "/Length" &&
+        keyName !== "/Filter" &&
+        keyName !== "/DecodeParms"
+      ) {
         decryptStringsRC4(value, objectNum, generationNum, encryptionKey);
       }
     }
@@ -485,7 +624,11 @@ async function verifyPerms(fileKey, encryptParams) {
     const decrypted = await aes256EcbDecryptBlock(perms, fileKey);
 
     // Bytes 0-3 should match permissions (little-endian)
-    const p0 = decrypted[0] | (decrypted[1] << 8) | (decrypted[2] << 16) | (decrypted[3] << 24);
+    const p0 =
+      decrypted[0] |
+      (decrypted[1] << 8) |
+      (decrypted[2] << 16) |
+      (decrypted[3] << 24);
     if ((p0 | 0) !== (permissions | 0)) {
       return false;
     }
@@ -497,7 +640,11 @@ async function verifyPerms(fileKey, encryptParams) {
     }
 
     // Bytes 9-11 should be 'a', 'd', 'b'
-    if (decrypted[9] !== 0x61 || decrypted[10] !== 0x64 || decrypted[11] !== 0x62) {
+    if (
+      decrypted[9] !== 0x61 ||
+      decrypted[10] !== 0x64 ||
+      decrypted[11] !== 0x62
+    ) {
       return false;
     }
 
@@ -530,21 +677,21 @@ function collectEncryptedItems(context, encryptRefNum, encryptMetadata) {
     // Skip signature dictionaries — /Contents and /ByteRange must not be decrypted
     // per PDF spec Section 7.6.1 (applies to both stream and non-stream /Sig objects)
     if (obj instanceof PDFDict && !(obj instanceof PDFRawStream)) {
-      const type = obj.get(PDFName.of('Type'));
-      if (type && type.toString() === '/Sig') continue;
+      const type = obj.get(PDFName.of("Type"));
+      if (type && type.toString() === "/Sig") continue;
     }
 
     // Check if this is a stream with a /Type we should skip
     if (obj instanceof PDFRawStream && obj.dict) {
-      const type = obj.dict.get(PDFName.of('Type'));
+      const type = obj.dict.get(PDFName.of("Type"));
       if (type) {
         const typeName = type.toString();
         // XRef streams are never encrypted
-        if (typeName === '/XRef') continue;
+        if (typeName === "/XRef") continue;
         // Signature streams must not be decrypted
-        if (typeName === '/Sig') continue;
+        if (typeName === "/Sig") continue;
         // Skip metadata streams when EncryptMetadata is false
-        if (typeName === '/Metadata' && !encryptMetadata) continue;
+        if (typeName === "/Metadata" && !encryptMetadata) continue;
       }
     }
 
@@ -553,12 +700,23 @@ function collectEncryptedItems(context, encryptRefNum, encryptMetadata) {
       const streamData = obj.contents;
       // AES-256 streams: IV (16 bytes) + ciphertext
       if (streamData.length >= 16) {
-        streamItems.push({ ref, obj, data: streamData, objectNum, generationNum });
+        streamItems.push({
+          ref,
+          obj,
+          data: streamData,
+          objectNum,
+          generationNum,
+        });
       }
 
       // Collect strings in stream dictionaries
       if (obj.dict) {
-        collectStringsFromObject(obj.dict, objectNum, generationNum, stringItems);
+        collectStringsFromObject(
+          obj.dict,
+          objectNum,
+          generationNum,
+          stringItems,
+        );
       }
     }
 
@@ -580,17 +738,21 @@ function collectStringsFromObject(obj, objectNum, generationNum, items) {
   if (obj instanceof PDFString) {
     const bytes = obj.asBytes();
     if (bytes.length >= 16) {
-      items.push({ obj, bytes, type: 'string', objectNum, generationNum });
+      items.push({ obj, bytes, type: "string", objectNum, generationNum });
     }
   } else if (obj instanceof PDFHexString) {
     const bytes = obj.asBytes();
     if (bytes.length >= 16) {
-      items.push({ obj, bytes, type: 'hex', objectNum, generationNum });
+      items.push({ obj, bytes, type: "hex", objectNum, generationNum });
     }
   } else if (obj instanceof PDFDict) {
     for (const [key, value] of obj.entries()) {
       const keyName = key.asString();
-      if (keyName !== '/Length' && keyName !== '/Filter' && keyName !== '/DecodeParms') {
+      if (
+        keyName !== "/Length" &&
+        keyName !== "/Filter" &&
+        keyName !== "/DecodeParms"
+      ) {
         collectStringsFromObject(value, objectNum, generationNum, items);
       }
     }
@@ -636,7 +798,7 @@ async function decryptAllAES256(streamItems, stringItems, cryptoKey) {
   for (let i = 0; i < streamItems.length; i += BATCH_SIZE) {
     const batch = streamItems.slice(i, i + BATCH_SIZE);
     const results = await Promise.all(
-      batch.map(item => decryptAES256Blob(item.data, cryptoKey))
+      batch.map((item) => decryptAES256Blob(item.data, cryptoKey)),
     );
 
     // Write results back synchronously
@@ -649,7 +811,7 @@ async function decryptAllAES256(streamItems, stringItems, cryptoKey) {
   for (let i = 0; i < stringItems.length; i += BATCH_SIZE) {
     const batch = stringItems.slice(i, i + BATCH_SIZE);
     const results = await Promise.all(
-      batch.map(item => decryptAES256Blob(item.bytes, cryptoKey))
+      batch.map((item) => decryptAES256Blob(item.bytes, cryptoKey)),
     );
 
     // Write results back synchronously
@@ -657,8 +819,134 @@ async function decryptAllAES256(streamItems, stringItems, cryptoKey) {
       const item = batch[j];
       const decrypted = results[j];
 
-      if (item.type === 'string') {
-        item.obj.value = Array.from(decrypted).map(b => String.fromCharCode(b)).join('');
+      if (item.type === "string") {
+        item.obj.value = Array.from(decrypted)
+          .map((b) => String.fromCharCode(b))
+          .join("");
+      } else {
+        item.obj.value = bytesToHex(decrypted);
+      }
+    }
+  }
+}
+
+// ========== AES-128 Per-Object Decryption (Batched) ==========
+
+/**
+ * Decrypt a single AES-128 encrypted blob with per-object key derivation
+ * Per PDF 1.6+ (V=4, R=4): derive per-object key, then AES-128-CBC decrypt
+ *
+ * Per-object key derivation (Algorithm 1 with AES modification):
+ * 1. Concatenate: fileKey + objNum(3 bytes LE) + genNum(2 bytes LE) + "sAlT"
+ * 2. MD5 hash → use first min(keyLength + 5, 16) = 16 bytes
+ * 3. First 16 bytes of data are IV, rest is AES-128-CBC ciphertext
+ *
+ * @param {Uint8Array} data - Encrypted data (IV + ciphertext)
+ * @param {number} objectNum - PDF object number
+ * @param {number} generationNum - PDF generation number
+ * @param {Uint8Array} encryptionKey - File encryption key (16 bytes)
+ * @returns {Promise<Uint8Array>} - Decrypted data
+ */
+async function decryptAES128Blob(
+  data,
+  objectNum,
+  generationNum,
+  encryptionKey,
+) {
+  if (data.length < 16) return data;
+
+  // Derive per-object key: fileKey + objNum(3 LE) + genNum(2 LE) + "sAlT"
+  const keyInput = new Uint8Array(encryptionKey.length + 5 + 4);
+  keyInput.set(encryptionKey);
+
+  // Add object number (low byte first)
+  keyInput[encryptionKey.length] = objectNum & 0xff;
+  keyInput[encryptionKey.length + 1] = (objectNum >> 8) & 0xff;
+  keyInput[encryptionKey.length + 2] = (objectNum >> 16) & 0xff;
+
+  // Add generation number (low byte first)
+  keyInput[encryptionKey.length + 3] = generationNum & 0xff;
+  keyInput[encryptionKey.length + 4] = (generationNum >> 8) & 0xff;
+
+  // Append "sAlT" (0x73, 0x41, 0x6C, 0x54) — AES marker per PDF spec
+  keyInput[encryptionKey.length + 5] = 0x73; // s
+  keyInput[encryptionKey.length + 6] = 0x41; // A
+  keyInput[encryptionKey.length + 7] = 0x6c; // l
+  keyInput[encryptionKey.length + 8] = 0x54; // T
+
+  // MD5 hash to get object key (always 16 bytes for AES-128)
+  const objectKey = md5(keyInput).slice(0, 16);
+
+  // Extract IV (first 16 bytes) and ciphertext
+  const iv = data.slice(0, 16);
+  const ciphertext = data.slice(16);
+
+  // Edge case: empty ciphertext after IV
+  if (ciphertext.length === 0) {
+    return new Uint8Array(0);
+  }
+
+  // Ciphertext must be a multiple of 16 bytes for AES-CBC
+  if (ciphertext.length % 16 !== 0) {
+    return data; // Return original data if not valid AES-CBC
+  }
+
+  try {
+    return await aes128CbcDecrypt(ciphertext, objectKey, iv);
+  } catch {
+    // If decryption fails (e.g., invalid padding), return original
+    return data;
+  }
+}
+
+/**
+ * Decrypt all collected AES-128 items in batches using Promise.all
+ * Each item gets its own per-object key (unlike AES-256 which uses one file key)
+ */
+async function decryptAllAES128(streamItems, stringItems, encryptionKey) {
+  // Decrypt streams in batches
+  for (let i = 0; i < streamItems.length; i += BATCH_SIZE) {
+    const batch = streamItems.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(
+      batch.map((item) =>
+        decryptAES128Blob(
+          item.data,
+          item.objectNum,
+          item.generationNum,
+          encryptionKey,
+        ),
+      ),
+    );
+
+    // Write results back synchronously
+    for (let j = 0; j < batch.length; j++) {
+      batch[j].obj.contents = results[j];
+    }
+  }
+
+  // Decrypt strings in batches
+  for (let i = 0; i < stringItems.length; i += BATCH_SIZE) {
+    const batch = stringItems.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(
+      batch.map((item) =>
+        decryptAES128Blob(
+          item.bytes,
+          item.objectNum,
+          item.generationNum,
+          encryptionKey,
+        ),
+      ),
+    );
+
+    // Write results back synchronously
+    for (let j = 0; j < batch.length; j++) {
+      const item = batch[j];
+      const decrypted = results[j];
+
+      if (item.type === "string") {
+        item.obj.value = Array.from(decrypted)
+          .map((b) => String.fromCharCode(b))
+          .join("");
       } else {
         item.obj.value = bytesToHex(decrypted);
       }
@@ -670,8 +958,14 @@ async function decryptAllAES256(streamItems, stringItems, cryptoKey) {
 
 /**
  * Decrypt all objects using RC4 (synchronous, from decrypt-lite)
+ * @param {boolean} encryptMetadata - Whether metadata streams should be decrypted (default true)
  */
-function decryptAllRC4(context, encryptionKey, encryptRefNum) {
+function decryptAllRC4(
+  context,
+  encryptionKey,
+  encryptRefNum,
+  encryptMetadata = true,
+) {
   const indirectObjects = context.enumerateIndirectObjects();
 
   for (const [ref, obj] of indirectObjects) {
@@ -686,15 +980,19 @@ function decryptAllRC4(context, encryptionKey, encryptRefNum) {
     // Skip objects that must not be decrypted per PDF spec (Section 7.6.1)
     // Signature dictionaries: /Contents and /ByteRange must not be decrypted
     if (obj instanceof PDFDict && !(obj instanceof PDFRawStream)) {
-      const type = obj.get(PDFName.of('Type'));
-      if (type && type.toString() === '/Sig') continue;
+      const type = obj.get(PDFName.of("Type"));
+      if (type && type.toString() === "/Sig") continue;
     }
 
     if (obj instanceof PDFRawStream && obj.dict) {
-      const type = obj.dict.get(PDFName.of('Type'));
+      const type = obj.dict.get(PDFName.of("Type"));
       if (type) {
         const typeName = type.toString();
-        if (typeName === '/XRef' || typeName === '/Sig') {
+        if (typeName === "/XRef" || typeName === "/Sig") {
+          continue;
+        }
+        // Skip metadata streams when EncryptMetadata is false
+        if (typeName === "/Metadata" && !encryptMetadata) {
           continue;
         }
       }
@@ -703,7 +1001,12 @@ function decryptAllRC4(context, encryptionKey, encryptRefNum) {
     // Decrypt streams
     if (obj instanceof PDFRawStream) {
       const streamData = obj.contents;
-      const decrypted = decryptObjectRC4(streamData, objectNum, generationNum, encryptionKey);
+      const decrypted = decryptObjectRC4(
+        streamData,
+        objectNum,
+        generationNum,
+        encryptionKey,
+      );
       obj.contents = decrypted;
 
       // Also decrypt strings within the stream's dictionary
@@ -724,7 +1027,7 @@ function decryptAllRC4(context, encryptionKey, encryptRefNum) {
 /**
  * Decrypt a password-protected PDF
  *
- * Supports both AES-256 (V=5, R=6) and RC4 (V=1-2, R=2-3) encryption.
+ * Supports AES-256 (V=5, R=6), AES-128 (V=4, R=4), and RC4 (V=1-2, R=2-3) encryption.
  * This is the same decryption engine that powers PDFSmaller.com's Unlock PDF tool!
  * Try it online at https://pdfsmaller.com/unlock-pdf
  *
@@ -743,7 +1046,7 @@ export async function decryptPDF(pdfBytes, password) {
     // Load the PDF without attempting to decrypt (let us handle it)
     const pdfDoc = await PDFDocument.load(pdfBytes, {
       ignoreEncryption: true,
-      updateMetadata: false
+      updateMetadata: false,
     });
 
     const context = pdfDoc.context;
@@ -752,14 +1055,17 @@ export async function decryptPDF(pdfBytes, password) {
     const encryptParams = readEncryptParams(context);
 
     if (!encryptParams) {
-      throw new Error('This PDF is not encrypted. No /Encrypt dictionary found.');
+      throw new Error(
+        "This PDF is not encrypted. No /Encrypt dictionary found.",
+      );
     }
 
-    const encryptRefNum = (encryptParams.encryptRef instanceof PDFRef)
-      ? encryptParams.encryptRef.objectNumber
-      : null;
+    const encryptRefNum =
+      encryptParams.encryptRef instanceof PDFRef
+        ? encryptParams.encryptRef.objectNumber
+        : null;
 
-    if (encryptParams.algorithm === 'AES-256') {
+    if (encryptParams.algorithm === "AES-256") {
       // ========== AES-256 Path ==========
       const pwdBytes = saslPrepPassword(password);
 
@@ -772,7 +1078,9 @@ export async function decryptPDF(pdfBytes, password) {
       }
 
       if (!fileKey) {
-        throw new Error('Incorrect password. The provided password does not match the user or owner password.');
+        throw new Error(
+          "Incorrect password. The provided password does not match the user or owner password.",
+        );
       }
 
       // Verify Perms (optional but recommended — warns but doesn't fail)
@@ -786,12 +1094,71 @@ export async function decryptPDF(pdfBytes, password) {
 
       // Collect all encrypted items (synchronous traversal)
       const { streamItems, stringItems } = collectEncryptedItems(
-        context, encryptRefNum, encryptParams.encryptMetadata
+        context,
+        encryptRefNum,
+        encryptParams.encryptMetadata,
       );
 
       // Decrypt all items in batches (async)
       await decryptAllAES256(streamItems, stringItems, cryptoKey);
+    } else if (encryptParams.algorithm === "AES-128") {
+      // ========== AES-128 Path (V=4, R=4) ==========
+      // Password validation uses the same algorithms as RC4 (Algorithms 2, 5, 7)
+      let encryptionKey = validateUserPasswordRC4(password, encryptParams);
 
+      if (!encryptionKey) {
+        encryptionKey = validateOwnerPasswordRC4(password, encryptParams);
+      }
+
+      if (!encryptionKey) {
+        throw new Error(
+          "Incorrect password. The provided password does not match the user or owner password.",
+        );
+      }
+
+      // Collect all encrypted items (synchronous traversal)
+      const { streamItems, stringItems } = collectEncryptedItems(
+        context,
+        encryptRefNum,
+        encryptParams.encryptMetadata,
+      );
+
+      // Decrypt streams: use AES-128 or RC4 depending on stream filter
+      if (encryptParams.stmFilter === "AESV2") {
+        await decryptAllAES128(streamItems, [], encryptionKey);
+      } else if (encryptParams.stmFilter !== "None") {
+        // RC4 for streams
+        for (const item of streamItems) {
+          item.obj.contents = decryptObjectRC4(
+            item.data,
+            item.objectNum,
+            item.generationNum,
+            encryptionKey,
+          );
+        }
+      }
+
+      // Decrypt strings: use AES-128 or RC4 depending on string filter
+      if (encryptParams.strFilter === "AESV2") {
+        await decryptAllAES128([], stringItems, encryptionKey);
+      } else if (encryptParams.strFilter !== "None") {
+        // RC4 for strings
+        for (const item of stringItems) {
+          const decrypted = decryptObjectRC4(
+            item.bytes,
+            item.objectNum,
+            item.generationNum,
+            encryptionKey,
+          );
+          if (item.type === "string") {
+            item.obj.value = Array.from(decrypted)
+              .map((b) => String.fromCharCode(b))
+              .join("");
+          } else {
+            item.obj.value = bytesToHex(decrypted);
+          }
+        }
+      }
     } else {
       // ========== RC4 Path ==========
       // Try user password first
@@ -802,11 +1169,18 @@ export async function decryptPDF(pdfBytes, password) {
       }
 
       if (!encryptionKey) {
-        throw new Error('Incorrect password. The provided password does not match the user or owner password.');
+        throw new Error(
+          "Incorrect password. The provided password does not match the user or owner password.",
+        );
       }
 
       // Decrypt all objects (synchronous)
-      decryptAllRC4(context, encryptionKey, encryptRefNum);
+      decryptAllRC4(
+        context,
+        encryptionKey,
+        encryptRefNum,
+        encryptParams.encryptMetadata,
+      );
     }
 
     // Remove the /Encrypt entry from the trailer
@@ -814,15 +1188,16 @@ export async function decryptPDF(pdfBytes, password) {
 
     // Save the decrypted PDF
     const decryptedBytes = await pdfDoc.save({
-      useObjectStreams: false
+      useObjectStreams: false,
     });
 
     return decryptedBytes;
-
   } catch (error) {
-    if (error.message.includes('not encrypted') ||
-        error.message.includes('Incorrect password') ||
-        error.message.includes('Unsupported encryption')) {
+    if (
+      error.message.includes("not encrypted") ||
+      error.message.includes("Incorrect password") ||
+      error.message.includes("Unsupported encryption")
+    ) {
       throw error;
     }
     throw new Error(`Failed to decrypt PDF: ${error.message}`);
@@ -833,7 +1208,7 @@ export async function decryptPDF(pdfBytes, password) {
  * Check if a PDF is encrypted (without attempting to decrypt)
  *
  * @param {Uint8Array} pdfBytes - The PDF file as bytes
- * @returns {Promise<{encrypted: boolean, algorithm?: 'AES-256'|'RC4', version?: number, revision?: number, keyLength?: number}>}
+ * @returns {Promise<{encrypted: boolean, algorithm?: 'AES-256'|'AES-128'|'RC4', version?: number, revision?: number, keyLength?: number}>}
  *
  * @example
  * const info = await isEncrypted(pdfBytes);
@@ -845,7 +1220,7 @@ export async function isEncrypted(pdfBytes) {
   try {
     const pdfDoc = await PDFDocument.load(pdfBytes, {
       ignoreEncryption: true,
-      updateMetadata: false
+      updateMetadata: false,
     });
 
     const encryptParams = readEncryptParams(pdfDoc.context);
@@ -859,7 +1234,7 @@ export async function isEncrypted(pdfBytes) {
       algorithm: encryptParams.algorithm,
       version: encryptParams.version,
       revision: encryptParams.revision,
-      keyLength: encryptParams.keyLength * 8 // return in bits
+      keyLength: encryptParams.keyLength * 8, // return in bits
     };
   } catch (error) {
     throw new Error(`Failed to read PDF: ${error.message}`);
