@@ -1,6 +1,6 @@
 {
   "name": "@localonlytools/pdf-decrypt",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Full-featured PDF decryption with AES-256 and RC4 support. Forked from @pdfsmaller/pdf-decrypt.",
   "type": "commonjs",
   "main": "dist/index.js",
